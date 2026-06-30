@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Identificadores específicos para HID DigitalPersona U.are.U 5300 -->
+    <!-- Vendor ID (VID): 1466 (0x05BA en Hexadecimal) -->
+    <!-- Product ID (PID): 10 (0x000A en Hexadecimal) -->
+
+    <usb-device vendor-id="1466" product-id="10" />
+</resources>
