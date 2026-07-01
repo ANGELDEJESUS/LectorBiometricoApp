@@ -15,6 +15,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -24,7 +25,7 @@ class MainActivity : AppCompatActivity() {
 
     // Identificadores de tu U.are.U 5300
     private val UAREU_VID = 1466
-    private val UAREU_PID = 10
+    private val UAREU_PID = 14
 
     private lateinit var usbManager: UsbManager
     private var biometricSensor: UsbDevice? = null
@@ -32,64 +33,110 @@ class MainActivity : AppCompatActivity() {
     // Referencia a la UI
     private lateinit var tvStatus: TextView
 
+    // Variable para rastrear si hubo una desconexión en medio del proceso
+    private var hubReinicioDetectado = false
+
     // Escuchador de eventos del puerto USB
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                ACTION_USB_PERMISSION -> {
-                    synchronized(this) {
-                        val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                        if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                            device?.let {
+            try {
+                when (intent.action) {
+                    ACTION_USB_PERMISSION -> {
+                        hubReinicioDetectado = false
+                        val extraGranted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+
+                        val liveDevice = usbManager.deviceList.values.find {
+                            it.vendorId == UAREU_VID && it.productId == UAREU_PID
+                        }
+
+                        val reallyHasPermission = liveDevice != null && usbManager.hasPermission(liveDevice)
+
+                        Log.d("USB_BIOMETRIA", "Intent: $extraGranted | Sistema: $reallyHasPermission")
+
+                        if (extraGranted || reallyHasPermission) {
+                            liveDevice?.let {
                                 updateStatus("Permiso concedido. Inicializando sensor...")
                                 initBiometricSDK(it)
                             }
                         } else {
-                            updateStatus("Error: El usuario denegó el permiso USB.")
-                            Log.e("USB_BIOMETRIA", "Permiso denegado para el dispositivo $device")
+                            updateStatus("Validando permisos con el sistema... (Espera 3s)")
+
+                            CoroutineScope(Dispatchers.Main).launch {
+                                var permissionGranted = false
+
+                                for (i in 1..3) {
+                                    delay(1000)
+
+                                    // Si en medio de esta espera, saltó el evento DETACHED, detenemos todo.
+                                    if (hubReinicioDetectado) {
+                                        updateStatus("🚨 EL HUB REINICIÓ LA CONEXIÓN: El hardware se desconectó físicamente por un instante. Permiso anulado.")
+                                        return@launch
+                                    }
+
+                                    val retryDevice = usbManager.deviceList.values.find {
+                                        it.vendorId == UAREU_VID && it.productId == UAREU_PID
+                                    }
+
+                                    if (retryDevice != null && usbManager.hasPermission(retryDevice)) {
+                                        permissionGranted = true
+                                        updateStatus("Permiso concedido (Intento $i). Inicializando...")
+                                        initBiometricSDK(retryDevice)
+                                        break
+                                    } else {
+                                        updateStatus("Verificando autorización en Samsung Knox ($i/3)...")
+                                    }
+                                }
+
+                                if (!permissionGranted && !hubReinicioDetectado) {
+                                    updateStatus("❌ BLOQUEO DE SEGURIDAD: El S23 Ultra bloqueó el permiso. Esto suele ocurrir al usar Hubs con hardware biométrico.")
+                                }
+                            }
                         }
                     }
-                }
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    device?.let {
-                        if (it.vendorId == UAREU_VID && it.productId == UAREU_PID) {
-                            updateStatus("Sensor desconectado.")
-                            biometricSensor = null
-                            // TODO: Llamar al método de limpieza del SDK (ej. mReader.Close())
+                    UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                        hubReinicioDetectado = true
+                        val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                        }
+
+                        device?.let {
+                            if (it.vendorId == UAREU_VID && it.productId == UAREU_PID) {
+                                updateStatus("🚨 DESCONEXIÓN FÍSICA DETECTADA: El Hub reinició la línea de datos.")
+                                biometricSensor = null
+                            }
                         }
                     }
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                        checkForConnectedSensor()
+                    }
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    // Si se conecta con la app ya abierta, volvemos a escanear
-                    checkForConnectedSensor()
-                }
+            } catch (e: Exception) {
+                updateStatus("Error de sistema: ${e.message}")
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Asegúrate de tener un TextView con el id tvStatus en tu activity_main.xml
         setContentView(R.layout.activity_main)
 
-        tvStatus = findViewById(R.id.tvStatus) // Reemplaza con tu ID real de UI
-
+        tvStatus = findViewById(R.id.tvStatus)
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
 
-        // Registramos el Receiver para escuchar eventos del sistema
         val filter = IntentFilter().apply {
             addAction(ACTION_USB_PERMISSION)
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
 
-        // Usando ContextCompat para manejar la compatibilidad de versiones sin errores de Lint
         ContextCompat.registerReceiver(
             this,
             usbReceiver,
             filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED
+            ContextCompat.RECEIVER_EXPORTED
         )
 
         updateStatus("Buscando sensor U.are.U 5300...")
@@ -100,18 +147,24 @@ class MainActivity : AppCompatActivity() {
         val deviceList: HashMap<String, UsbDevice> = usbManager.deviceList
         var sensorFound = false
 
+        if (deviceList.isEmpty()) {
+            updateStatus("El puerto está vacío.")
+            return
+        }
+
         for (device in deviceList.values) {
             if (device.vendorId == UAREU_VID && device.productId == UAREU_PID) {
                 sensorFound = true
                 biometricSensor = device
-                updateStatus("Sensor detectado. Solicitando permiso...")
-                solicitarPermisoUsb(device)
-                break
-            }
-        }
 
-        if (!sensorFound) {
-            updateStatus("Por favor, conecte el lector biométrico.")
+                if (usbManager.hasPermission(device)) {
+                    updateStatus("Permiso previo detectado. Inicializando sensor...")
+                    initBiometricSDK(device)
+                } else {
+                    updateStatus("Sensor detectado. Solicitando permiso...")
+                    solicitarPermisoUsb(device)
+                }
+            }
         }
     }
 
@@ -122,34 +175,20 @@ class MainActivity : AppCompatActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
 
-        val permissionIntent = PendingIntent.getBroadcast(
-            this,
-            0,
-            Intent(ACTION_USB_PERMISSION),
-            flags
-        )
+        val intent = Intent(ACTION_USB_PERMISSION).apply {
+            setPackage(packageName)
+        }
 
-        // Esta línea lanza el popup del sistema
+        val permissionIntent = PendingIntent.getBroadcast(this, 0, intent, flags)
         usbManager.requestPermission(device, permissionIntent)
     }
 
     private fun initBiometricSDK(device: UsbDevice) {
-        // Ejecutamos la lógica bloqueante del SDK en un hilo secundario usando Corrutinas
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // --- INICIO DE LA LÓGICA DE DIGITALPERSONA ---
-                // Aquí instanciarás UareUGlobal.getReaderCollection()
-                // Y llamarás a reader.Open() y reader.Capture()
-
                 withContext(Dispatchers.Main) {
-                    updateStatus("SDK Inicializado. Lector listo para capturar.")
+                    updateStatus("✅ SDK Inicializado. Lector listo para capturar.")
                 }
-
-                // Simulación de una captura bloqueante
-                // val captureResult = reader.Capture(...)
-
-                // --- FIN DE LA LÓGICA DE DIGITALPERSONA ---
-
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     updateStatus("Error en SDK: ${e.localizedMessage}")
@@ -158,7 +197,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Función auxiliar para actualizar la UI desde cualquier hilo
     private fun updateStatus(message: String) {
         Log.d("USB_BIOMETRIA", message)
         runOnUiThread {
@@ -168,7 +206,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Es vital desregistrar el receiver para evitar fugas de memoria
         unregisterReceiver(usbReceiver)
     }
 }
