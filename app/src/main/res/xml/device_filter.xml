@@ -4,5 +4,5 @@
     <!-- Vendor ID (VID): 1466 (0x05BA en Hexadecimal) -->
     <!-- Product ID (PID): 10 (0x000A en Hexadecimal) -->
 
-    <usb-device vendor-id="1466" product-id="10" />
+    <usb-device vendor-id="1466" product-id="14" />
 </resources>
